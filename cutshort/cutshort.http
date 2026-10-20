@@ -1,0 +1,77 @@
+### Cutshort scraper — /cutshort/* (SCRAPERS_PORT=6113 ONLY_SCRAPER=cutshort python run.py)
+@base = http://127.0.0.1:6113
+
+### jobs: search by skill + city (50 cards a page, newest first)
+GET {{base}}/cutshort/jobs/search?query=python&location=pune
+
+### jobs: remote React.js jobs admitting 3 years, paying up to ₹10L+
+GET {{base}}/cutshort/jobs/search?query=React.js&remote=true&experience_years=3&min_salary_lakhs=10
+
+### jobs: a listing link / slug as the query, page 2
+GET {{base}}/cutshort/jobs/search?query=https://cutshort.io/jobs/remote-golang-jobs&page=2
+
+### jobs: every job (the startup-jobs hub), internships only, posted this week
+GET {{base}}/cutshort/jobs/search?role_type=internship&posted_within_days=7
+
+### jobs: details by link / short id / record id (+ the ten similar jobs)
+GET {{base}}/cutshort/jobs/details?job=https://cutshort.io/job/Full-Stack-Software-Engineer-Provenir-I1i8FXO2&include_similar=true
+
+###
+GET {{base}}/cutshort/jobs/details?job=I1i8FXO2
+
+### jobs: batch (up to 10)
+GET {{base}}/cutshort/jobs/batch?jobs=I1i8FXO2,uhRqRgf1
+
+### jobs: similar
+GET {{base}}/cutshort/jobs/similar?job=I1i8FXO2
+
+### jobs: the listing catalogue (slugs /cutshort/jobs/search takes as `query`)
+GET {{base}}/cutshort/jobs/categories?query=react&location=pune
+
+###
+GET {{base}}/cutshort/jobs/categories?remote=true&page=2
+
+### companies: name search
+GET {{base}}/cutshort/companies/search?query=meesho&limit=3
+
+### companies: profile by name / alias / link (10 open jobs a page)
+GET {{base}}/cutshort/companies/details?company=Meesho
+
+###
+GET {{base}}/cutshort/companies/details?company=https://cutshort.io/company/jobs-at-wissen-technology-79-09J2iH1M&page=2
+
+### companies: a company's open jobs
+GET {{base}}/cutshort/companies/jobs?company=jobs-at-wissen-technology-79-09J2iH1M&page=3
+
+### companies: directories (category + city, or a directory slug / link)
+GET {{base}}/cutshort/companies/directory?category=fintech&location=pune
+
+###
+GET {{base}}/cutshort/companies/directory?location=bangalore
+
+### companies: every directory the site has
+GET {{base}}/cutshort/companies/categories?location=pune
+
+### salaries: a role in a city / remote / india
+GET {{base}}/cutshort/salaries?title=Python%20Developer&location=Bengaluru
+
+###
+GET {{base}}/cutshort/salaries?title=https://cutshort.io/salary/data-scientist/remote
+
+### salaries: the roles and locations with a page
+GET {{base}}/cutshort/salaries/titles?location=pune
+
+### job descriptions: the 98 templates, one template
+GET {{base}}/cutshort/job-descriptions
+
+###
+GET {{base}}/cutshort/job-descriptions/details?title=Python%20Developer
+
+### lookups
+GET {{base}}/cutshort/locations
+
+###
+GET {{base}}/cutshort/autocomplete?query=pyth&type=skills&limit=5
+
+###
+GET {{base}}/cutshort/autocomplete?query=mees&type=companies

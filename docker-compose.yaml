@@ -1,0 +1,10 @@
+services:
+  cutshort-scraper:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      # Optional — Cutshort did not rate-limit 40 parallel requests, so leave this unset.
+      # - CUTSHORT_PROXY=http://user:pass@host:port
