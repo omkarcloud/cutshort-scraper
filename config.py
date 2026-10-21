@@ -23,6 +23,7 @@ CUTSHORT_MAX_ATTEMPTS = MAX_RETRIES
 CUTSHORT_WORKERS = int(os.environ.get("CUTSHORT_WORKERS", "6"))
 
 CUTSHORT_PROXY = os.environ.get("CUTSHORT_PROXY") or None
+CUTSHORT_ALLOW_DIRECT = True               # no CUTSHORT_PROXY set -> connect directly from this machine
 
 
 def cutshort_proxy(fallback=False):

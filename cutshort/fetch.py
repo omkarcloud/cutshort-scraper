@@ -36,12 +36,17 @@ challenge, 40 parallel calls from one IP all 200):
                               companies, job titles, locations; public
                               search-only key).
 
-Egress: direct by default (config.CUTSHORT_PROXY_COUNTRY None); a 403 / 429 /
-5xx / transport failure is retried on a fresh sticky residential exit
-(config.cutshort_proxy(fallback=True)). Uncached listing pages take ~10 s
-on the site's side; the Cloudflare edge serves repeats in <1 s. The
-patchright click-through (indeed/fetch.py _browser_page) is the escalation
-if a challenge ever appears — not built while plain HTTP works.
+Egress: every call rides a proxy exit (config.cutshort_proxy(): a sticky
+residential exit in CUTSHORT_PROXY_COUNTRY). Cutshort is never
+contacted from the server's own IP: with no proxy configured the call fails,
+unless the config opts in with CUTSHORT_ALLOW_DIRECT = True (the open-source
+kit does, for a user's own machine; the scrapers service never does). Each
+worker thread keeps its exit and curl session between calls (keep-alive)
+until a call fails; a 403 / 429 / 5xx / transport failure drops that exit and
+the retry opens a fresh one. Uncached listing pages take ~10 s on the site's
+side; the Cloudflare edge serves repeats in <1 s. The patchright
+click-through (indeed/fetch.py _browser_page) is the escalation if a
+challenge ever appears — not built while plain HTTP works.
 
 Failure taxonomy (scraper_errors, mapped to HTTP by route_glue):
   CutshortUpstreamError  transport failure / 5xx / unexpected body — retryable
@@ -153,15 +158,33 @@ def _drop_session(key):
             pass
 
 
+def _proxy(fallback=False):
+    """A new exit; refuses to go on without one (Cutshort never sees the
+    server's own IP) unless the config opts in to direct egress."""
+    proxy = config.cutshort_proxy(fallback=fallback)
+    if not proxy and not getattr(config, "CUTSHORT_ALLOW_DIRECT", False):
+        raise CutshortUpstreamError("no Cutshort proxy configured (Cutshort is never contacted from the server's IP)")
+    return proxy
+
+
+def _thread_exit():
+    """This thread's current exit: reused across calls (one sticky IP, one
+    keep-alive session) until a call on it fails."""
+    if not hasattr(_local, "exit"):
+        _local.exit = _proxy()
+    return _local.exit
+
+
 def _attempts(label, send):
-    """Run send(session) under the retry policy: CutshortUpstreamError (incl.
-    Blocked) retries on a fresh exit up to config.CUTSHORT_MAX_ATTEMPTS
-    times; BadRequest / NotFound surface at once."""
+    """Run send(session) under the retry policy: the first attempt rides the
+    thread's exit, every retry a fresh one. CutshortUpstreamError (incl.
+    Blocked) retries up to config.CUTSHORT_MAX_ATTEMPTS times; BadRequest /
+    NotFound surface at once."""
     attempts = max(1, int(config.CUTSHORT_MAX_ATTEMPTS))
     last = None
     for attempt in range(1, attempts + 1):
-        proxy = config.cutshort_proxy(fallback=attempt > 1)
-        key = f"{attempt if proxy else 0}:{proxy or 'direct'}"
+        proxy = _thread_exit() if attempt == 1 else _proxy(fallback=True)
+        key = proxy or "direct"
         sess = _session(key, proxy)
         try:
             return send(sess)
@@ -172,6 +195,8 @@ def _attempts(label, send):
         except Exception as e:
             last = CutshortUpstreamError(f"request failed on {label}: {type(e).__name__}: {e}")
         _drop_session(key)
+        if attempt == 1 and hasattr(_local, "exit"):
+            del _local.exit                      # the next call starts on a fresh exit
         print(f"cutshort: attempt {attempt}/{attempts} on {label} failed: {last}")
         if attempt < attempts:
             time.sleep(1.0 * attempt)
