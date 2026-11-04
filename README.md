@@ -135,7 +135,7 @@ You're a developer — we know how hard completing a project can be. So we offer
 
 [![Message Us on WhatsApp about Cutshort Scraper](https://raw.githubusercontent.com/omkarcloud/assets/master/images/whatsapp-us.png)](https://www.omkar.cloud/l/cutshort-scraper-github-whatsapp)
 
-[![Ask Us by Email about Cutshort Scraper](https://raw.githubusercontent.com/omkarcloud/assets/master/images/ask-on-email.png)](https://www.omkar.cloud/l/cutshort-scraper-github-email)
+[![Ask Us by Email about Cutshort Scraper](https://raw.githubusercontent.com/omkarcloud/assets/master/images/ask-on-email.png)](mailto:happy.to.help@omkar.cloud?subject=Help%20with%20Cutshort%20Scraper%20API&body=I%20need%20help%20using%20the%20Cutshort%20Scraper%20API.)
 
 ## ⚡ Popular Scrapers by Omkar Cloud
 
