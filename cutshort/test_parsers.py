@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cutshort import companies, fetch, jobs, lookups, parsers as P, refdata, refs, salaries, schemas, shared as S  # noqa: E402
 from schema_fields import load_query  # noqa: E402
+from scraper_utils.testing import hosted_only
 
 FX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 
@@ -544,3 +545,49 @@ def test_fetch_unwrap():
         fetch._unwrap(fx("job_not_found"), "x")
     with pytest.raises(fetch.CutshortUpstreamError):
         fetch._unwrap("nope", "x")
+
+
+@hosted_only
+def test_exit_sequence(monkeypatch):
+    """CUTSHORT_EXIT = "gateway:in": the gateway first, the proxy exit on a
+    call's last retry and on every retry after a gateway timeout; None keeps
+    every attempt on a proxy exit (the behaviour before 2026-11-11)."""
+    import config
+
+    class GatewayError(Exception):
+        pass
+
+    monkeypatch.setattr(config, "residential_proxy", lambda country, states=None: f"http://u__cr.{country}:p@gw:1")
+    monkeypatch.setattr(config, "CUTSHORT_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(fetch.time, "sleep", lambda s: None)
+    monkeypatch.setattr(fetch, "_session", lambda key, proxy: key)
+    monkeypatch.setattr(fetch, "_drop_session", lambda key: None)
+
+    def run(exit, failures):
+        monkeypatch.setattr(config, "CUTSHORT_EXIT", exit)
+        monkeypatch.setattr(fetch, "_local", fetch.threading.local())
+        seen, queue = [], list(failures)
+
+        def send(sess):
+            seen.append("gateway" if sess.startswith("gateway") else "residential")
+            if queue:
+                raise queue.pop(0)
+            return "ok"
+        try:
+            fetch._attempts("x", send)
+        except fetch.CutshortUpstreamError:
+            seen.append("raised")
+        return seen
+
+    assert run("gateway:in", []) == ["gateway"]
+    assert run("gateway:in", [fetch.CutshortBlocked("403")]) == ["gateway", "gateway"]
+    assert run("gateway:in", [fetch.CutshortBlocked("403")] * 2) == ["gateway", "gateway", "residential"]
+    assert run("gateway:in", [fetch.CutshortBlocked("403")] * 3) == ["gateway", "gateway", "residential", "raised"]
+    timeout = GatewayError("gateway 504 InternalServerErrorException for https://cutshort.io/x")
+    assert run("gateway:in", [timeout]) == ["gateway", "residential"]
+    assert run("gateway:in", [timeout, fetch.CutshortUpstreamError("HTTP 502")]) == ["gateway", "residential", "residential"]
+    assert run("gateway:in", [GatewayError("gateway 429 TooManyRequestsException for https://cutshort.io/x")]) == ["gateway", "gateway"]
+    assert run(None, [fetch.CutshortBlocked("403")] * 2) == ["residential"] * 3
+    assert "__cr.in" in config.cutshort_proxy(fallback=True) and "__cr.in" in config.cutshort_proxy()
+    monkeypatch.setattr(config, "CUTSHORT_EXIT", "gateway:in")
+    assert config.cutshort_proxy() == "gateway:in" and "__cr.in" in config.cutshort_proxy(fallback=True)

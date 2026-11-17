@@ -36,14 +36,18 @@ challenge, 40 parallel calls from one IP all 200):
                               companies, job titles, locations; public
                               search-only key).
 
-Egress: every call rides a proxy exit (config.cutshort_proxy(): a sticky
-residential exit in CUTSHORT_PROXY_COUNTRY). Cutshort is never
+Egress: every call rides the exit config.cutshort_proxy() names: in
+production the Mumbai gateway exit (knob CUTSHORT_EXIT = "gateway:in",
+2026-11-11; a fresh gateway address per request), with CUTSHORT_EXIT = None a
+sticky residential exit in CUTSHORT_PROXY_COUNTRY. Cutshort is never
 contacted from the server's own IP: with no proxy configured the call fails,
 unless the config opts in with CUTSHORT_ALLOW_DIRECT = True (the open-source
 kit does, for a user's own machine; the scrapers service never does). Each
 worker thread keeps its exit and curl session between calls (keep-alive)
 until a call fails; a 403 / 429 / 5xx / transport failure drops that exit and
-the retry opens a fresh one. Uncached listing pages take ~10 s on the site's
+the retry opens a fresh one; a call's last retry, and every retry after the
+gateway's 29 s timeout, rides the residential exit (it waits 90 s for a page
+the site is slow to build). Uncached listing pages take ~10 s on the site's
 side; the Cloudflare edge serves repeats in <1 s. The patchright
 click-through (indeed/fetch.py _browser_page) is the escalation if a
 challenge ever appears — not built while plain HTTP works.
@@ -55,6 +59,7 @@ Failure taxonomy (scraper_errors, mapped to HTTP by route_glue):
   CutshortNotFound       no such job / company / listing / page    — never retried
 """
 import json
+import fastjson
 import os
 import re
 import sys
@@ -67,16 +72,18 @@ from urllib.parse import quote, urlencode
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
+import egress
 from scraper_errors import BadRequest, Blocked, NotFound, UpstreamError
 from cutshort import refdata
+from scraper_utils import debug, fanout, memo, sessions
+from scraper_utils.pages import is_challenged
 
 IMPERSONATE = "chrome"
 TIMEOUT = (10, 90)            # (connect, read): an uncached listing page takes the site ~10 s
 
-JSON_HEADERS = {"accept": "application/json, text/plain, */*", "accept-language": "en-US,en;q=0.9",
+JSON_HEADERS = {"accept": "application/json, text/plain, */*",
                 "referer": f"{refdata.BASE_URL}/"}
-HTML_HEADERS = {"accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "accept-language": "en-US,en;q=0.9"}
+HTML_HEADERS = {"accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
 CF_MARKERS = ("just a moment", "challenge-error-text", "cf-chl", "challenge-platform", "attention required")
 
 WEBPAGE = "/backend-api/webpage"
@@ -107,14 +114,7 @@ class PastEnd(CutshortNotFound):
 
 def dump_debug(name, text):
     """Write a raw response to $CUTSHORT_DEBUG_DIR/<name>.txt for post-mortems."""
-    dbg = os.environ.get("CUTSHORT_DEBUG_DIR", "")
-    if dbg and text:
-        try:
-            os.makedirs(dbg, exist_ok=True)
-            with open(os.path.join(dbg, name + ".txt"), "w") as f:
-                f.write(text)
-        except OSError:
-            pass
+    debug.dump("CUTSHORT_DEBUG_DIR", name, text)
 
 
 # ---- curl sessions (per thread, keyed by exit) ---------------------------------------------------
@@ -123,39 +123,16 @@ _local = threading.local()
 
 
 def _sessions():
-    store = getattr(_local, "sessions", None)
-    if store is None:
-        store = _local.sessions = OrderedDict()
-    return store
+    return sessions.thread_store(_local)
 
 
 def _session(key, proxy):
-    from curl_cffi import requests as curl_requests
-    store = _sessions()
-    sess = store.get(key)
-    if sess is None:
-        sess = curl_requests.Session(impersonate=IMPERSONATE)
-        if proxy:
-            sess.proxies = {"http": proxy, "https": proxy}
-        store[key] = sess
-        while len(store) > 4:
-            _, old = store.popitem(last=False)
-            try:
-                old.close()
-            except Exception:
-                pass
-    else:
-        store.move_to_end(key)
-    return sess
+    return sessions.keyed(_sessions(), key, lambda: sessions.speaking(
+        egress.new_session(proxy, impersonate=IMPERSONATE), egress.accept_language(proxy)), 4)
 
 
 def _drop_session(key):
-    sess = _sessions().pop(key, None)
-    if sess is not None:
-        try:
-            sess.close()
-        except Exception:
-            pass
+    sessions.drop_keyed(_sessions(), key)
 
 
 def _proxy(fallback=False):
@@ -175,15 +152,26 @@ def _thread_exit():
     return _local.exit
 
 
+def _gateway_timed_out(error):
+    """the gateway's own 29 s limit (exit_gateway.GatewayError, 504): the site
+    was still building the page (an uncached /companies/startups page takes
+    it 25 s and more, 2026-11-11), so only an exit that can wait will do."""
+    return type(error).__name__ == "GatewayError" and " 504 " in str(error)
+
+
 def _attempts(label, send):
     """Run send(session) under the retry policy: the first attempt rides the
-    thread's exit, every retry a fresh one. CutshortUpstreamError (incl.
+    thread's exit, every retry a fresh one; the LAST retry, and every retry
+    after a gateway exit timeout, rides the proxy exit
+    (config.cutshort_proxy(fallback=True)), so a gateway problem degrades to
+    the residential path instead of an error. CutshortUpstreamError (incl.
     Blocked) retries up to config.CUTSHORT_MAX_ATTEMPTS times; BadRequest /
     NotFound surface at once."""
     attempts = max(1, int(config.CUTSHORT_MAX_ATTEMPTS))
     last = None
+    fallback = False
     for attempt in range(1, attempts + 1):
-        proxy = _thread_exit() if attempt == 1 else _proxy(fallback=True)
+        proxy = _thread_exit() if attempt == 1 else _proxy(fallback=fallback or attempt == attempts)
         key = proxy or "direct"
         sess = _session(key, proxy)
         try:
@@ -194,20 +182,14 @@ def _attempts(label, send):
             last = e
         except Exception as e:
             last = CutshortUpstreamError(f"request failed on {label}: {type(e).__name__}: {e}")
+            fallback = fallback or _gateway_timed_out(e)
         _drop_session(key)
         if attempt == 1 and hasattr(_local, "exit"):
-            del _local.exit                      # the next call starts on a fresh exit
+            del _local.exit # the next call starts on a fresh exit
         print(f"cutshort: attempt {attempt}/{attempts} on {label} failed: {last}")
         if attempt < attempts:
             time.sleep(1.0 * attempt)
     raise last
-
-
-def is_challenged(status, headers, text):
-    if (headers or {}).get("cf-mitigated") == "challenge":
-        return True
-    head = (text or "")[:4000].lower()
-    return status in (403, 429, 503) and any(m in head for m in CF_MARKERS)
 
 
 def _classify(resp, label, json_body=True, allow_redirect=False):
@@ -244,7 +226,7 @@ def _classify(resp, label, json_body=True, allow_redirect=False):
 
 def _json_or_none(text):
     try:
-        return json.loads(text)
+        return fastjson.loads(text)
     except ValueError:
         return None
 
@@ -383,19 +365,7 @@ MEMO_MAX = 256
 
 
 def memoized(key, fn, ttl=MEMO_TTL):
-    now = time.monotonic()
-    with _memo_lock:
-        hit = _memo.get(key)
-        if hit and now - hit[0] < ttl:
-            _memo.move_to_end(key)
-            return hit[1]
-    value = fn()
-    with _memo_lock:
-        _memo[key] = (now, value)
-        _memo.move_to_end(key)
-        while len(_memo) > MEMO_MAX:
-            _memo.popitem(last=False)
-    return value
+    return memo.memoized(_memo, _memo_lock, MEMO_MAX, key, fn, ttl)
 
 
 def shared_raw(name, params, build, ttl):
@@ -403,30 +373,13 @@ def shared_raw(name, params, build, ttl):
     the service's response cache (pods share it) when one is installed,
     then build(). Without a `cache` module (the standalone package) it is
     the in-process memo alone."""
-    try:
-        from cache import cached_call
-    except ImportError:
-        cached_call = None
-    seconds = ttl.total_seconds() if hasattr(ttl, "total_seconds") else ttl
-    key = (name, json.dumps(params, sort_keys=True))
-    if cached_call is None:
-        return memoized(key, build, ttl=min(seconds, MEMO_TTL))
-    return memoized(key, lambda: cached_call(f"cutshort.raw.{name}", params, lambda **_: build(), ttl),
-                    ttl=min(seconds, MEMO_TTL))
+    return memo.shared_raw(memoized, "cutshort.raw.", MEMO_TTL, name, params, build, ttl)
 
 
 def run_parallel(fns, workers):
     """Run zero-arg callables in parallel; results align with `fns`. Each
     result is ("ok", value) or ("error", exception)."""
-    def guard(fn):
-        try:
-            return ("ok", fn())
-        except Exception as e:
-            return ("error", e)
-    if not fns:
-        return []
-    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(fns)))) as ex:
-        return list(ex.map(guard, fns))
+    return fanout.guarded_per_call(fns, workers)
 
 
 if __name__ == "__main__":

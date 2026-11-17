@@ -16,6 +16,7 @@ record bookkeeping), `_highlightResult` (search highlighting), `caseStudy` /
 `testimonials` (the site's own marketing on description pages),
 `breadcrumbs` (navigation), `menu_has_sub_cat` (layout)."""
 import json
+import fastjson
 import re
 from math import ceil
 
@@ -632,7 +633,7 @@ def next_data(html):
     if not match:
         return None
     try:
-        return json.loads(match.group(1))
+        return fastjson.loads(match.group(1))
     except ValueError:
         return None
 
@@ -649,7 +650,7 @@ def _queries(data):
 def _query(queries, head):
     """The dehydrated query whose key starts with `head` (first match)."""
     for key, value in queries.items():
-        parsed = json.loads(key)
+        parsed = fastjson.loads(key)
         if isinstance(parsed, list) and parsed and parsed[0] == head:
             yield parsed, value
 

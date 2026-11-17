@@ -2,75 +2,21 @@
 numbers, text, dates, site links and HTML descriptions. Pure functions, no
 network; every helper tolerates None and junk.
 
-The generic helpers (g / as_list / as_dict, num … iso_date, html_to_text)
-have the same semantics as instahyre/shared.py and seek/shared.py; they
-live here so the cutshort package stands alone (it ships as its own
-open-source repo, which must not pull in other sites' modules)."""
+The generic helpers (g / as_list / as_dict, num … iso_date, html_to_text) have
+the same semantics as instahyre/shared.py and seek/shared.py; the ones every
+site shares come from scraper_utils and the rest live here (the cutshort
+package ships as its own open-source repo, which must not pull in other sites'
+modules)."""
 import html as html_lib
 import re
 from datetime import datetime
 from html.parser import HTMLParser
 
 from cutshort import refdata
-
-# ---- safe access ---------------------------------------------------------------------------
-
-def g(obj, *path, default=None):
-    """Safe nested get: g(d, "a", "b", 0) -> d["a"]["b"][0] or default."""
-    for step in path:
-        if isinstance(step, int):
-            if not isinstance(obj, list) or not -len(obj) <= step < len(obj):
-                return default
-            obj = obj[step]
-        else:
-            if not isinstance(obj, dict):
-                return default
-            obj = obj.get(step)
-        if obj is None:
-            return default
-    return obj
-
-
-def as_list(value):
-    return value if isinstance(value, list) else []
-
-
-def as_dict(value):
-    return value if isinstance(value, dict) else {}
-
+from scraper_utils.text import html_to_text, multiline
+from scraper_utils.values import as_dict, as_list, count, g, num, to_int_round as to_int, year
 
 # ---- numbers -------------------------------------------------------------------------------
-
-def num(value):
-    """int / float / numeric string ('1,234.5') -> float; bool, junk, NaN -> None."""
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value) if value == value else None
-    try:
-        out = float(str(value).strip().replace(",", ""))
-    except ValueError:
-        return None
-    return out if out == out else None
-
-
-def to_int(value):
-    out = num(value)
-    return int(round(out)) if out is not None else None
-
-
-def count(value):
-    """A non-negative count; negatives -> 0."""
-    out = to_int(value)
-    if out is None:
-        return None
-    return out if out >= 0 else 0
-
-
-def year(value):
-    """A founding year: 4-digit int, else None (the site stores 0 for unknown)."""
-    out = to_int(value)
-    return out if out and 1000 <= out <= 2100 else None
 
 
 def lakhs(value):
@@ -86,16 +32,6 @@ def text(value):
     if value is None or isinstance(value, bool):
         return None
     out = " ".join(html_lib.unescape(str(value)).replace("\xa0", " ").split())
-    return out or None
-
-
-def multiline(value):
-    """Like text() but keeps line breaks (descriptions)."""
-    if value is None:
-        return None
-    lines = [" ".join(line.split()) for line in html_lib.unescape(str(value)).replace("\xa0", " ").splitlines()]
-    out = "\n".join(lines)
-    out = re.sub(r"\n{3,}", "\n\n", out).strip()
     return out or None
 
 
@@ -213,59 +149,6 @@ def is_remote_city(name):
 _BLOCK_TAGS = {"p", "div", "br", "li", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "table",
                "section", "article", "header", "footer", "blockquote", "pre", "hr", "dd", "dt", "dl"}
 _SKIP_TAGS = {"script", "style", "noscript", "template", "head"}
-
-
-class _TextExtractor(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.parts = []
-        self._skip = 0
-
-    def handle_starttag(self, tag, attrs):
-        if tag in _SKIP_TAGS:
-            self._skip += 1
-        elif tag == "li":
-            self.parts.append("\n- ")
-        elif tag == "br":
-            self.parts.append("\n")
-        elif tag in _BLOCK_TAGS:
-            self.parts.append("\n")
-
-    def handle_endtag(self, tag):
-        if tag in _SKIP_TAGS:
-            self._skip = max(0, self._skip - 1)
-        elif tag in ("li", "br"):
-            return
-        elif tag in ("ul", "ol"):
-            self.parts.append("\n\n")      # a list ends its paragraph
-        elif tag in _BLOCK_TAGS:
-            self.parts.append("\n")
-
-    def handle_data(self, data):
-        if not self._skip:
-            self.parts.append(data)
-
-
-def html_to_text(value):
-    """An HTML fragment -> readable plain text: block elements become line
-    breaks, list items get a dash, runs of blank lines collapse."""
-    value = value if isinstance(value, str) else None
-    if not value:
-        return None
-    if "<" not in value:
-        return multiline(value)
-    parser = _TextExtractor()
-    try:
-        parser.feed(value)
-        parser.close()
-    except Exception:
-        return multiline(re.sub(r"<[^>]+>", " ", value))
-    raw = "".join(parser.parts).replace("\xa0", " ")
-    lines = [" ".join(line.split()) for line in raw.splitlines()]
-    out = "\n".join(lines)
-    out = re.sub(r"\n{3,}", "\n\n", out)
-    out = re.sub(r"\n\n(- )", r"\n\1", out).strip()   # list items stay tight
-    return out or None
 
 
 def html_fragment(value):
